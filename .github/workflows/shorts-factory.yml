@@ -1,4 +1,4 @@
-name: Shorts Factory Pipeline
+name: Shorts Factory v2 Pipeline
 
 on:
   workflow_dispatch:
@@ -7,8 +7,12 @@ on:
         description: 'YouTube video URL to process'
         required: true
         type: string
+      hf_token:
+        description: 'HuggingFace token for speaker diarization (optional)'
+        required: false
+        type: string
   schedule:
-    - cron: '0 0 * * *'  # Can be enabled for daily runs
+    - cron: '0 0 * * *'
 
 env:
   PYTHON_VERSION: '3.12'
@@ -16,19 +20,16 @@ env:
 jobs:
   process-shorts:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      # ── Checkout ──────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── System dependencies ───────────────────────────────
       - name: Install FFmpeg and system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-color-emoji
 
-      # ── Python setup ──────────────────────────────────────
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
@@ -40,11 +41,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ── Create runtime directories ────────────────────────
       - name: Create output directories
         run: mkdir -p downloads clips captions output logs
 
-      # ── Download fonts (if not committed) ─────────────────
       - name: Ensure fonts are present
         run: |
           if [ ! -f assets/fonts/Montserrat-ExtraBold.ttf ]; then
@@ -52,19 +51,26 @@ jobs:
             curl -sL "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Bold.ttf" -o assets/fonts/Montserrat-Bold.ttf
             curl -sL "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-ExtraBold.ttf" -o assets/fonts/Montserrat-ExtraBold.ttf
           fi
-          ls -la assets/fonts/
 
-      # ── Dependency check ──────────────────────────────────
+      - name: Inject HuggingFace token if provided
+        if: ${{ github.event.inputs.hf_token != '' }}
+        run: |
+          python -c "
+          import json
+          with open('config.json') as f: c = json.load(f)
+          c['hf_token'] = '${{ github.event.inputs.hf_token }}'
+          with open('config.json', 'w') as f: json.dump(c, f, indent=2)
+          print('HF token injected into config.json')
+          "
+
       - name: Verify dependencies
         run: python main.py --check
 
-      # ── Download Whisper model (cache for future runs) ────
       - name: Pre-download Whisper model
         run: |
-          python -c "import whisper; whisper.load_model('base'); print('Whisper base model cached')"
+          python -c "import whisper; whisper.load_model('base'); print('Whisper cached')"
 
-      # ── Run the pipeline ──────────────────────────────────
-      - name: Run Shorts Factory Pipeline
+      - name: Run Shorts Factory v2 Pipeline
         env:
           YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
         run: |
@@ -74,7 +80,6 @@ jobs:
           fi
           python main.py --ci "$YOUTUBE_URL"
 
-      # ── Upload outputs as artifacts ───────────────────────
       - name: Upload shorts as artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -84,7 +89,6 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      # ── Upload logs as artifacts ──────────────────────────
       - name: Upload logs
         uses: actions/upload-artifact@v4
         if: always()
@@ -93,9 +97,6 @@ jobs:
           path: logs/
           retention-days: 3
 
-      # ── Cleanup (save disk space) ─────────────────────────
-      - name: Cleanup working directory
+      - name: Cleanup
         if: always()
-        run: |
-          rm -rf downloads/ clips/ captions/
-          echo "Cleanup complete"
+        run: rm -rf downloads/ clips/ captions/

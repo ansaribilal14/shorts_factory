@@ -25,6 +25,21 @@
   "audio_bitrate": "192k",
   "whisper_model": "base",
   "language": "en",
-  "telegram_bot_token": "",
-  "telegram_chat_id": ""
+  "telegram_bot_token": "YOUR_BOT_TOKEN_HERE",
+  "telegram_chat_id": "YOUR_CHAT_ID_HERE",
+  "hf_token": null,
+  "speaker_camera_enabled": true,
+  "speaker_camera_sample_fps": 2,
+  "speaker_camera_smooth_factor": 0.85,
+  "speaker_face_vertical_position": 0.3,
+  "viral_score_min_hook": 0.3,
+  "viral_score_min_self_containment": 0.4,
+  "viral_window_step_sec": 5,
+  "viral_candidate_durations": [
+    30,
+    40,
+    50,
+    55
+  ],
+  "show_score_breakdown": true
 }

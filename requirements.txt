@@ -9,3 +9,12 @@ tqdm
 colorama
 requests
 numpy
+pyannote.audio
+torch
+torchaudio
+mediapipe
+vaderSentiment
+nltk
+librosa
+scipy
+opencv-python-headless

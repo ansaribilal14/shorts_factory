@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-main.py — Shorts Factory Orchestrator.
+main.py — Shorts Factory v2 Orchestrator.
+Upgraded with: Speaker-Focused Smart Camera + Viral Score Engine.
+
 Usage:
-    python main.py              # Run the full pipeline
+    python main.py              # Interactive mode
     python main.py --check      # Verify all dependencies
-    python main.py --ci <URL>   # CI mode: no prompts, uses config.json for everything
+    python main.py --ci <URL>   # CI/headless mode
 """
 
 import os
@@ -29,8 +31,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 def setup_logging():
     os.makedirs(LOGS_DIR, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(LOGS_DIR, f"run_{timestamp}.log")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(LOGS_DIR, f"run_{ts}.log")
     logging.basicConfig(level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()])
@@ -40,14 +42,30 @@ def setup_logging():
 logger = setup_logging()
 
 
-def _progress_bar(pct: float, label: str, bar_width: int = 30):
+def _progress_bar(pct, label, bar_width=30):
     filled = int(bar_width * pct / 100)
     bar = '\u2588' * filled + '\u2591' * (bar_width - filled)
     print(f"\n  {Fore.GREEN}[{bar}]{Style.RESET_ALL} {pct:5.1f}% \u2014 {Fore.WHITE}{label}{Style.RESET_ALL}")
 
 
+def _fmt_time(seconds):
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+
+def _bar(score, width=10):
+    """Visual score bar for breakdown display."""
+    filled = int(width * score)
+    return '\u2588' * filled + '\u2591' * (width - filled)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DEPENDENCY CHECK (v2)
+# ═══════════════════════════════════════════════════════════════════════
+
 def run_dependency_check():
-    print(f"\n{Fore.CYAN}  Running dependency check...{Style.RESET_ALL}\n")
+    print(f"\n{Fore.CYAN}  Running dependency check (v2)...{Style.RESET_ALL}\n")
     checks = []
     py_version = sys.version_info
     py_ok = py_version >= (3, 10)
@@ -66,7 +84,9 @@ def run_dependency_check():
     modules = [
         ("yt_dlp", "yt-dlp"), ("whisper", "openai-whisper"), ("moviepy", "moviepy"),
         ("PIL", "Pillow"), ("ffmpeg", "ffmpeg-python"), ("telegram", "python-telegram-bot"),
-        ("numpy", "numpy"),
+        ("numpy", "numpy"), ("mediapipe", "mediapipe"),
+        ("pyannote.audio", "pyannote.audio"), ("vaderSentiment", "vaderSentiment"),
+        ("librosa", "librosa"),
     ]
     for mod, name in modules:
         try:
@@ -84,15 +104,37 @@ def run_dependency_check():
         print(f"  {sym} {fname}")
         checks.append(ok)
 
+    # Viral keywords
+    kw_path = os.path.join(BASE_DIR, "assets", "viral_keywords.json")
+    if os.path.exists(kw_path):
+        with open(kw_path) as f:
+            kw_data = json.load(f)
+        total_kw = sum(len(v) for v in kw_data.values())
+        print(f"  {Fore.GREEN}\u2713{Style.RESET_ALL} assets/viral_keywords.json ({total_kw} keywords, {len(kw_data)} categories)")
+        checks.append(True)
+    else:
+        print(f"  {Fore.RED}\u2717{Style.RESET_ALL} assets/viral_keywords.json (missing)")
+        checks.append(False)
+
     config_ok = os.path.exists(CONFIG_PATH)
     sym = f"{Fore.GREEN}\u2713{Style.RESET_ALL}" if config_ok else f"{Fore.RED}\u2717{Style.RESET_ALL}"
     print(f"  {sym} config.json")
     checks.append(config_ok)
-    print()
 
+    # HF token warning
+    if config_ok:
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        if not cfg.get("hf_token"):
+            print(f"\n  {Fore.YELLOW}  HuggingFace token not set \u2014 speaker camera will use center-crop fallback{Style.RESET_ALL}")
+            print(f"  {Fore.YELLOW}    Run python main.py to set it up.{Style.RESET_ALL}")
+        else:
+            print(f"  {Fore.GREEN}\u2713{Style.RESET_ALL} HuggingFace token (set)")
+
+    print()
     if all(checks):
         print(f"  {Fore.GREEN}{'=' * 50}{Style.RESET_ALL}")
-        print(f"  {Fore.GREEN}  ALL CHECKS PASSED! Shorts Factory is ready.{Style.RESET_ALL}")
+        print(f"  {Fore.GREEN}  ALL CHECKS PASSED! Shorts Factory v2 ready.{Style.RESET_ALL}")
         print(f"  {Fore.GREEN}{'=' * 50}{Style.RESET_ALL}")
         return True
     else:
@@ -103,70 +145,114 @@ def run_dependency_check():
         return False
 
 
-def load_config() -> dict:
+# ═══════════════════════════════════════════════════════════════════════
+# CONFIG HELPERS
+# ═══════════════════════════════════════════════════════════════════════
+
+def load_config():
     with open(CONFIG_PATH, 'r') as f:
         return json.load(f)
 
-
-def save_config(config: dict):
+def save_config(config):
     with open(CONFIG_PATH, 'w') as f:
         json.dump(config, f, indent=2)
 
-
-def is_valid_youtube_url(url: str) -> bool:
+def is_valid_youtube_url(url):
     return any(url.startswith(p) for p in [
         "https://www.youtube.com/", "https://youtu.be/",
         "https://m.youtube.com/", "http://www.youtube.com/", "http://youtu.be/"])
 
 
-def _fmt_time(seconds: float) -> str:
-    h, rem = divmod(int(seconds), 3600)
-    m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+# ═══════════════════════════════════════════════════════════════════════
+# v2 VIRAL SCORE TABLE DISPLAY
+# ═══════════════════════════════════════════════════════════════════════
 
-
-def _draw_segment_table(segments: list):
+def _draw_viral_table(segments, show_breakdown=True):
     if not segments:
         return
-    col_widths = [7, 10, 10, 7, 45]
-    header = ["Short", "Start", "End", "Dur", "Preview"]
-    print(f"\n  {'+'.join('-' * w for w in col_widths)}")
-    print(f"  {'|'.join(f' {h:<{w-2}} ' for h, w in zip(header, col_widths))}|")
-    print(f"  {'+'.join('-' * w for w in col_widths)}")
+    # Header
+    print(f"\n  {'+'.join('-' * 8 for _ in range(7))}")
+    cols = [("Rank", 7), ("Start", 8), ("End", 8), ("Dur", 6),
+            ("Score", 7), ("Hook Type", 22), ("Opening Hook", 42)]
+    header_line = "  " + "|".join(f" {h:<{w-2}} " for h, w in cols) + "|"
+    print(header_line)
+    print(f"  {'+'.join('-' * 8 for _ in range(7))}")
+
     for i, seg in enumerate(segments):
-        dur = int(seg['end'] - seg['start'])
-        preview = seg.get('transcript_excerpt', '')[:40]
-        if len(seg.get('transcript_excerpt', '')) > 40:
-            preview += "..."
-        row = [f"  #{i+1}", _fmt_time(seg['start']), _fmt_time(seg['end']), f"  {dur}s", f"  {preview}"]
-        print(f"  {'|'.join(f'{r:<{w}}' for r, w in zip(row, col_widths))}|")
-    print(f"  {'+'.join('-' * w for w in col_widths)}\n")
+        dur = int(seg["end"] - seg["start"])
+        score = seg.get("final_score", 0)
+        hook_type = seg.get("hook_type", "?")[:20]
+        hook_text = seg.get("first_sentence", seg.get("transcript_excerpt", ""))[:40]
+        row = [
+            f"  #{i+1}",
+            _fmt_time(seg["start"]),
+            _fmt_time(seg["end"]),
+            f"  {dur}s",
+            f"  {score:.2f}",
+            f"  {hook_type}",
+            f"  {hook_text}",
+        ]
+        print("  " + "|".join(f"{r:<{w}}" for r, w in zip(row, [c[1] for c in cols])) + "|")
+
+    print(f"  {'+'.join('-' * 8 for _ in range(7))}")
+
+    # Score breakdown for top 3
+    if show_breakdown:
+        for i in range(min(3, len(segments))):
+            seg = segments[i]
+            score = seg.get("final_score", 0)
+            print(f"\n  {Fore.CYAN}Score Breakdown \u2014 Short #{i+1} "
+                  f"(score: {score:.2f}){Style.RESET_ALL}")
+            print(f"     Hook Strength:    {_bar(seg.get('hook_score', 0))}  "
+                  f"{seg.get('hook_score', 0):.2f}  "
+                  f"[{seg.get('hook_type', '?')}]")
+            print(f"     Emotional Energy: {_bar(seg.get('emotional_energy', 0))}  "
+                  f"{seg.get('emotional_energy', 0):.2f}")
+            print(f"     Self-Containment: {_bar(seg.get('self_containment', 0))}  "
+                  f"{seg.get('self_containment', 0):.2f}")
+            kw = seg.get('matched_keywords', [])
+            kw_str = ", ".join(kw[:5]) + (f" +{len(kw)-5} more" if len(kw) > 5 else "")
+            print(f"     Trend Keywords:   {_bar(seg.get('trend_keywords', 0))}  "
+                  f"{seg.get('trend_keywords', 0):.2f}  "
+                  f"[{kw_str}]")
+            dur = seg["end"] - seg["start"]
+            print(f"     Pacing:           {_bar(seg.get('pacing', 0))}  "
+                  f"{seg.get('pacing', 0):.2f}  "
+                  f"[{dur:.0f}s]")
+    print()
 
 
-def _apply_audio_fades(input_path: str, output_path: str):
+# ═══════════════════════════════════════════════════════════════════════
+# AUDIO FADE HELPER
+# ═══════════════════════════════════════════════════════════════════════
+
+def _apply_audio_fades(input_path, output_path):
     import ffmpeg as ff
     (ff.input(input_path).filter('afade', t='in', st=0, d=0.05)
      .filter('afade', t='out', st=-0.05, d=0.05)
      .output(output_path, c='copy', loglevel='error').run(overwrite_output=True))
 
 
-def run_pipeline_ci(youtube_url: str):
-    """CI mode — no prompts, uses config.json for all settings including Telegram."""
+# ═══════════════════════════════════════════════════════════════════════
+# v2 PIPELINE (CI MODE)
+# ═══════════════════════════════════════════════════════════════════════
+
+def run_pipeline_ci(youtube_url):
     from downloader import download_video, get_video_metadata
-    from transcriber import transcribe_video, save_transcription, find_best_short_segments
+    from transcriber import transcribe_video, save_transcription
+    from viral_scorer import score_all_segments
     from clip_extractor import extract_clip, reframe_to_vertical
     from caption_renderer import render_captions_on_clip
     from motion_graphics import compose_final_short
     from telegram_uploader import upload_shorts_to_telegram
 
     config = load_config()
-    print(f"\n{Fore.CYAN}  CI MODE — Processing: {youtube_url}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}  CI MODE v2 \u2014 {youtube_url}{Style.RESET_ALL}")
 
     try:
         metadata = get_video_metadata(youtube_url)
     except Exception as e:
-        logger.error(f"Metadata fetch failed: {e}")
-        print(f"  {Fore.RED}Cannot access video: {e}{Style.RESET_ALL}")
+        logger.error(f"Metadata failed: {e}")
         return False
 
     print(f"  Found: {metadata['title']} ({metadata['duration']}s)")
@@ -181,7 +267,7 @@ def run_pipeline_ci(youtube_url: str):
     video_path = video_info['path']
     video_id = video_info['video_id']
 
-    _progress_bar(30, "Transcribing audio (Whisper)...")
+    _progress_bar(25, "Transcribing with Whisper...")
     try:
         srt_text, word_timestamps = transcribe_video(video_path,
             model_size=config.get('whisper_model', 'base'), language=config.get('language', 'en'))
@@ -194,84 +280,114 @@ def run_pipeline_ci(youtube_url: str):
         print(f"  {Fore.RED}No speech detected.{Style.RESET_ALL}")
         return False
 
-    _progress_bar(50, "Finding best segments...")
-    segments = find_best_short_segments(word_timestamps, metadata,
-        num_shorts=config.get('shorts_count', 5),
-        min_sec=config.get('short_duration_min', 30),
-        max_sec=config.get('short_duration_max', 58))
+    # Speaker camera pipeline (optional, graceful fallback)
+    speaker_timeline = []
+    if config.get('speaker_camera_enabled') and config.get('hf_token'):
+        _progress_bar(40, "Running speaker diarization (pyannote)...")
+        try:
+            from speaker_camera import run_full_speaker_pipeline
+            speaker_timeline = run_full_speaker_pipeline(
+                video_path, config['hf_token'], video_id, config)
+        except Exception as e:
+            logger.warning(f"Speaker camera failed, using fallback: {e}")
+
+        if speaker_timeline:
+            _progress_bar(50, "Building face tracking map...")
+        else:
+            _progress_bar(50, "Speaker camera unavailable \u2014 using center-crop fallback")
+    else:
+        _progress_bar(50, "Speaker camera disabled \u2014 using center-crop fallback")
+
+    _progress_bar(60, "Scoring all segments for virality...")
+    try:
+        segments = score_all_segments(
+            video_path, word_timestamps, audio_path=video_path,
+            min_sec=config.get('short_duration_min', 30) - 5,
+            max_sec=config.get('short_duration_max', 58),
+            step_sec=config.get('viral_window_step_sec', 5),
+            candidate_durations=config.get('viral_candidate_durations', [30, 40, 50, 55]),
+            num_shorts=config.get('shorts_count', 5),
+            min_self_containment=config.get('viral_score_min_self_containment', 0.40),
+        )
+    except Exception as e:
+        logger.error(f"Viral scoring failed: {e}")
+        return False
 
     if not segments:
         print(f"  {Fore.RED}No suitable segments found.{Style.RESET_ALL}")
         return False
 
-    print(f"\n  {Fore.GREEN}Found {len(segments)} segments:{Style.RESET_ALL}")
-    _draw_segment_table(segments)
+    _draw_viral_table(segments, config.get('show_score_breakdown', True))
 
-    _progress_bar(70, "Extracting & reframing...")
-    clip_paths, vertical_paths = [], []
+    _progress_bar(75, "Extracting + smart reframing clips...")
+    vertical_paths = []
     for i, seg in enumerate(segments):
         print(f"\n  {Fore.CYAN}-- Clip #{i+1}/{len(segments)} --{Style.RESET_ALL}")
         try:
-            cp = extract_clip(video_path, seg['start'], seg['end'], i, CLIPS_DIR)
-            vp = reframe_to_vertical(cp, CLIPS_DIR, config.get('background_blur', True))
-            clip_paths.append(cp)
-            vertical_paths.append(vp)
+            clip_path = extract_clip(video_path, seg['start'], seg['end'], i, CLIPS_DIR)
+
+            # Smart reframe if speaker timeline available
+            if speaker_timeline:
+                from speaker_camera import reframe_with_speaker_tracking
+                vp = reframe_with_speaker_tracking(
+                    clip_path, speaker_timeline, seg['start'],
+                    os.path.join(CLIPS_DIR, f"clip_{i:02d}_smart_reframe.mp4"),
+                    smooth_factor=config.get('speaker_camera_smooth_factor', 0.85),
+                    face_vertical_pos=config.get('speaker_face_vertical_position', 0.30),
+                )
+            else:
+                vp = reframe_to_vertical(clip_path, CLIPS_DIR, config.get('background_blur', True))
+
+            vertical_paths.append((i, seg, vp))
         except Exception as e:
             logger.error(f"Clip {i} failed: {e}")
-            clip_paths.append(None)
-            vertical_paths.append(None)
 
-    valid_indices = [i for i, vp in enumerate(vertical_paths) if vp is not None]
-    if not valid_indices:
+    if not vertical_paths:
         print(f"  {Fore.RED}All clips failed.{Style.RESET_ALL}")
         return False
 
-    _progress_bar(85, "Rendering captions + motion graphics...")
+    _progress_bar(88, "Rendering captions + motion graphics...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     final_outputs = []
-    for i in valid_indices:
+    for i, seg, vp in vertical_paths:
         print(f"\n  {Fore.CYAN}-- Rendering #{i+1} --{Style.RESET_ALL}")
         try:
-            captioned_path = os.path.join(CLIPS_DIR, f"clip_{i:02d}_captioned.mp4")
-            render_captions_on_clip(vertical_paths[i], word_timestamps, segments[i]['start'], config, captioned_path)
-            faded_path = os.path.join(CLIPS_DIR, f"clip_{i:02d}_faded.mp4")
-            _apply_audio_fades(captioned_path, faded_path)
-            output_path = os.path.join(OUTPUT_DIR, f"short_{i+1:02d}.mp4")
-            compose_final_short(vertical_paths[i], faded_path, config, i, output_path)
-            final_outputs.append(output_path)
+            captioned = os.path.join(CLIPS_DIR, f"clip_{i:02d}_captioned.mp4")
+            render_captions_on_clip(vp, word_timestamps, seg['start'], config, captioned)
+            faded = os.path.join(CLIPS_DIR, f"clip_{i:02d}_faded.mp4")
+            _apply_audio_fades(captioned, faded)
+            out = os.path.join(OUTPUT_DIR, f"short_{i+1:02d}.mp4")
+            compose_final_short(vp, faded, config, i, out)
+            final_outputs.append(out)
         except Exception as e:
             logger.error(f"Render {i+1} failed: {e}")
-            print(f"    {Fore.RED}Skipped: {e}{Style.RESET_ALL}")
+            print(f"    {Fore.RED}Skipped.{Style.RESET_ALL}")
 
     _progress_bar(100, "Done!")
     n = len(final_outputs)
     if n == 0:
-        print(f"\n  {Fore.RED}No shorts created.{Style.RESET_ALL}")
         return False
-
     print(f"\n{Fore.GREEN}{n} Short(s) created!{Style.RESET_ALL}")
     for f in final_outputs:
-        size_mb = os.path.getsize(f) / (1024 * 1024)
-        print(f"  {os.path.basename(f)} ({size_mb:.1f} MB)")
+        print(f"  {os.path.basename(f)} ({os.path.getsize(f)/(1024*1024):.1f} MB)")
 
-    # Upload to Telegram if credentials exist
     if config.get('telegram_bot_token') and config.get('telegram_chat_id'):
         print(f"\n{Fore.CYAN}  Uploading to Telegram...{Style.RESET_ALL}")
         try:
             upload_shorts_to_telegram(OUTPUT_DIR, config['telegram_bot_token'], config['telegram_chat_id'])
         except Exception as e:
-            logger.error(f"Telegram upload failed: {e}")
-            print(f"  {Fore.RED}Upload failed: {e}{Style.RESET_ALL}")
-    else:
-        print(f"\n  {Fore.YELLOW}No Telegram credentials — skipping upload.{Style.RESET_ALL}")
-
+            logger.error(f"Upload failed: {e}")
     return True
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# v2 PIPELINE (INTERACTIVE MODE)
+# ═══════════════════════════════════════════════════════════════════════
+
 def run_pipeline():
-    """Interactive mode — prompts user for URL and Telegram credentials."""
     from downloader import download_video, get_video_metadata
-    from transcriber import transcribe_video, save_transcription, find_best_short_segments
+    from transcriber import transcribe_video, save_transcription
+    from viral_scorer import score_all_segments
     from clip_extractor import extract_clip, reframe_to_vertical
     from caption_renderer import render_captions_on_clip
     from motion_graphics import compose_final_short
@@ -279,10 +395,33 @@ def run_pipeline():
 
     config = load_config()
 
+    # ── HuggingFace token setup (one-time) ──
+    if config.get('speaker_camera_enabled') and not config.get('hf_token'):
+        print(f"\n{Fore.CYAN}{'=' * 55}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}  SPEAKER DETECTION SETUP (one-time){Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'=' * 55}{Style.RESET_ALL}")
+        print(f"  Speaker tracking uses pyannote.audio (free, open-source).")
+        print(f"  It requires a free HuggingFace token.\n")
+        print(f"  HOW TO GET YOUR FREE TOKEN (1 minute):")
+        print(f"  1. Go to https://huggingface.co and create a free account")
+        print(f"  2. Visit: https://hf.co/settings/tokens")
+        print(f"  3. Click 'New token' -> name it 'shorts-factory' -> Role: Read")
+        print(f"  4. Copy the token (starts with hf_...)")
+        print(f"  5. Visit this page and click 'Agree':")
+        print(f"     https://hf.co/pyannote/speaker-diarization-community-1\n")
+
+        token = input(f"  {Fore.YELLOW}Paste your HuggingFace token (or press Enter to skip): {Style.RESET_ALL}").strip()
+        if token:
+            config['hf_token'] = token
+            save_config(config)
+            print(f"  {Fore.GREEN}Speaker detection ready.{Style.RESET_ALL}")
+        else:
+            print(f"  {Fore.YELLOW}Skipped. Speaker camera will use center-crop fallback.{Style.RESET_ALL}")
+
+    # ── STEP 1: YouTube URL ──
     print(f"\n{Fore.CYAN}{'=' * 50}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}  STEP 1 OF 2 \u2014 VIDEO INPUT{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'=' * 50}{Style.RESET_ALL}")
-    print(f"  Paste your YouTube video URL below.\n")
+    print(f"{Fore.CYAN}{'=' * 50}{Style.RESET_ALL}\n")
 
     while True:
         url = input(f"  {Fore.YELLOW}URL: {Style.RESET_ALL}").strip()
@@ -305,6 +444,7 @@ def run_pipeline():
         print(f"  {Fore.YELLOW}Cancelled.{Style.RESET_ALL}")
         return
 
+    # ── Download ──
     _progress_bar(10, "Downloading video...")
     try:
         video_info = download_video(url, DOWNLOADS_DIR)
@@ -314,7 +454,8 @@ def run_pipeline():
     video_path = video_info['path']
     video_id = video_info['video_id']
 
-    _progress_bar(30, "Transcribing audio (Whisper)...")
+    # ── Transcribe ──
+    _progress_bar(25, "Transcribing with Whisper...")
     try:
         srt_text, word_timestamps = transcribe_video(video_path,
             model_size=config.get('whisper_model', 'base'), language=config.get('language', 'en'))
@@ -326,49 +467,81 @@ def run_pipeline():
         print(f"  {Fore.RED}No speech detected.{Style.RESET_ALL}")
         return
 
-    _progress_bar(50, "Finding best segments...")
-    segments = find_best_short_segments(word_timestamps, metadata,
-        num_shorts=config.get('shorts_count', 5),
-        min_sec=config.get('short_duration_min', 30),
-        max_sec=config.get('short_duration_max', 58))
+    # ── Speaker camera ──
+    speaker_timeline = []
+    if config.get('speaker_camera_enabled') and config.get('hf_token'):
+        _progress_bar(40, "Running speaker diarization (pyannote)...")
+        try:
+            from speaker_camera import run_full_speaker_pipeline
+            speaker_timeline = run_full_speaker_pipeline(
+                video_path, config['hf_token'], video_id, config)
+        except Exception as e:
+            logger.warning(f"Speaker camera failed: {e}")
+            _progress_bar(50, "Speaker camera failed \u2014 using fallback")
+    else:
+        _progress_bar(50, "Speaker camera disabled \u2014 using center-crop")
+
+    # ── Viral scoring ──
+    _progress_bar(60, "Scoring all segments for virality...")
+    try:
+        segments = score_all_segments(
+            video_path, word_timestamps, audio_path=video_path,
+            min_sec=config.get('short_duration_min', 30) - 5,
+            max_sec=config.get('short_duration_max', 58),
+            step_sec=config.get('viral_window_step_sec', 5),
+            candidate_durations=config.get('viral_candidate_durations', [30, 40, 50, 55]),
+            num_shorts=config.get('shorts_count', 5),
+            min_self_containment=config.get('viral_score_min_self_containment', 0.40),
+        )
+    except Exception as e:
+        logger.error(f"Viral scoring failed: {e}")
+        return
     if not segments:
         print(f"  {Fore.RED}No suitable segments found.{Style.RESET_ALL}")
         return
-    print(f"\n  {Fore.GREEN}Found {len(segments)} great segments:{Style.RESET_ALL}")
-    _draw_segment_table(segments)
 
-    _progress_bar(70, "Extracting & reframing clips to 9:16...")
-    clip_paths, vertical_paths = [], []
+    _draw_viral_table(segments, config.get('show_score_breakdown', True))
+
+    # ── Extract + Smart Reframe ──
+    _progress_bar(75, "Extracting + smart reframing clips...")
+    vertical_paths = []
     for i, seg in enumerate(segments):
-        print(f"\n  {Fore.CYAN}-- Processing Short #{i+1}/{len(segments)} --{Style.RESET_ALL}")
+        print(f"\n  {Fore.CYAN}-- Clip #{i+1}/{len(segments)} --{Style.RESET_ALL}")
         try:
-            cp = extract_clip(video_path, seg['start'], seg['end'], i, CLIPS_DIR)
-            vp = reframe_to_vertical(cp, CLIPS_DIR, config.get('background_blur', True))
-            clip_paths.append(cp)
-            vertical_paths.append(vp)
+            clip_path = extract_clip(video_path, seg['start'], seg['end'], i, CLIPS_DIR)
+            if speaker_timeline:
+                from speaker_camera import reframe_with_speaker_tracking
+                vp = reframe_with_speaker_tracking(
+                    clip_path, speaker_timeline, seg['start'],
+                    os.path.join(CLIPS_DIR, f"clip_{i:02d}_smart_reframe.mp4"),
+                    smooth_factor=config.get('speaker_camera_smooth_factor', 0.85),
+                    face_vertical_pos=config.get('speaker_face_vertical_position', 0.30),
+                )
+            else:
+                vp = reframe_to_vertical(clip_path, CLIPS_DIR, config.get('background_blur', True))
+            vertical_paths.append((i, seg, vp))
         except Exception as e:
             logger.error(f"Clip {i} failed: {e}")
-            clip_paths.append(None)
-            vertical_paths.append(None)
+            print(f"    {Fore.RED}Skipped.{Style.RESET_ALL}")
 
-    valid_indices = [i for i, vp in enumerate(vertical_paths) if vp is not None]
-    if not valid_indices:
+    if not vertical_paths:
         print(f"\n  {Fore.RED}All clips failed.{Style.RESET_ALL}")
         return
 
-    _progress_bar(85, "Rendering captions + motion graphics...")
+    # ── Render captions + motion graphics ──
+    _progress_bar(88, "Rendering captions + motion graphics...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     final_outputs = []
-    for i in valid_indices:
-        print(f"\n  {Fore.CYAN}-- Rendering Short #{i+1} --{Style.RESET_ALL}")
+    for i, seg, vp in vertical_paths:
+        print(f"\n  {Fore.CYAN}-- Rendering #{i+1} --{Style.RESET_ALL}")
         try:
-            captioned_path = os.path.join(CLIPS_DIR, f"clip_{i:02d}_captioned.mp4")
-            render_captions_on_clip(vertical_paths[i], word_timestamps, segments[i]['start'], config, captioned_path)
-            faded_path = os.path.join(CLIPS_DIR, f"clip_{i:02d}_faded.mp4")
-            _apply_audio_fades(captioned_path, faded_path)
-            output_path = os.path.join(OUTPUT_DIR, f"short_{i+1:02d}.mp4")
-            compose_final_short(vertical_paths[i], faded_path, config, i, output_path)
-            final_outputs.append(output_path)
+            captioned = os.path.join(CLIPS_DIR, f"clip_{i:02d}_captioned.mp4")
+            render_captions_on_clip(vp, word_timestamps, seg['start'], config, captioned)
+            faded = os.path.join(CLIPS_DIR, f"clip_{i:02d}_faded.mp4")
+            _apply_audio_fades(captioned, faded)
+            out = os.path.join(OUTPUT_DIR, f"short_{i+1:02d}.mp4")
+            compose_final_short(vp, faded, config, i, out)
+            final_outputs.append(out)
         except Exception as e:
             logger.error(f"Render {i+1} failed: {e}")
             print(f"    {Fore.RED}Skipped.{Style.RESET_ALL}")
@@ -386,7 +559,7 @@ def run_pipeline():
         print(f"    {os.path.basename(f)} ({os.path.getsize(f)/(1024*1024):.1f} MB)")
     print(f"{Fore.GREEN}{'=' * 50}{Style.RESET_ALL}")
 
-    # Telegram upload
+    # ── Telegram upload ──
     if config.get('telegram_bot_token') and config.get('telegram_chat_id'):
         print(f"\n{Fore.CYAN}  Telegram credentials found. Uploading...{Style.RESET_ALL}")
         try:
@@ -396,6 +569,7 @@ def run_pipeline():
         except Exception as e:
             print(f"  {Fore.RED}Upload failed: {e}{Style.RESET_ALL}")
 
+    # ── Prompt for Telegram ──
     print(f"\n{Fore.YELLOW}{'=' * 55}{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}  STEP 2 OF 2 \u2014 SEND TO TELEGRAM{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}{'=' * 55}{Style.RESET_ALL}")
@@ -425,7 +599,7 @@ def run_pipeline():
     config['telegram_bot_token'] = bot_token
     config['telegram_chat_id'] = chat_id
     save_config(config)
-    print(f"  {Fore.GREEN}Credentials saved to config.json.{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Credentials saved.{Style.RESET_ALL}")
 
     try:
         upload_shorts_to_telegram(OUTPUT_DIR, bot_token, chat_id)
@@ -435,7 +609,7 @@ def run_pipeline():
     _print_done(n)
 
 
-def _print_done(n: int):
+def _print_done(n):
     print(f"\n{Fore.GREEN}{'=' * 55}{Style.RESET_ALL}")
     print(f"  ALL DONE! {n} shorts are ready.")
     print(f"  Next time: credentials are saved. Just paste a URL.")
@@ -443,10 +617,15 @@ def _print_done(n: int):
     print(f"{Fore.GREEN}{'=' * 55}{Style.RESET_ALL}")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════
+
 def print_banner():
     print(f"""
 {Fore.CYAN}===================================================
-  SHORTS FACTORY  -  GLM-5.2
+  SHORTS FACTORY v2  -  GLM-5.2
+  Speaker Camera + Viral Score Engine
   Powered by Z.ai x Your AI Agent
 ==================================================={Style.RESET_ALL}
 """)
@@ -464,7 +643,7 @@ def main():
                 ok = run_pipeline_ci(url)
                 sys.exit(0 if ok else 1)
             except Exception as e:
-                logger.critical(f"CI pipeline failed: {e}", exc_info=True)
+                logger.critical(f"CI failed: {e}", exc_info=True)
                 sys.exit(1)
     try:
         run_pipeline()
