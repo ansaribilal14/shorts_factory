@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# Output files (generated at runtime)
+downloads/
+clips/
+output/
+logs/
+captions/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Secrets (config has tokens — add to gitignore only if desired)
+# config.json is committed with tokens for CI; keep private repo
