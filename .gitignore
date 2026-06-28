@@ -29,5 +29,6 @@ Thumbs.db
 .idea/
 *.iml
 
-# Secrets (config has tokens — add to gitignore only if desired)
-# config.json is committed with tokens for CI; keep private repo
+# Secrets — NEVER commit these
+.env
+config.json

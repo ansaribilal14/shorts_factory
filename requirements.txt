@@ -1,3 +1,4 @@
+python-dotenv
 yt-dlp
 openai-whisper
 moviepy==1.0.3

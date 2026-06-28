@@ -52,16 +52,15 @@ jobs:
             curl -sL "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-ExtraBold.ttf" -o assets/fonts/Montserrat-ExtraBold.ttf
           fi
 
-      - name: Inject HuggingFace token if provided
-        if: ${{ github.event.inputs.hf_token != '' }}
+      - name: Write .env from GitHub secrets / workflow input
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HF_TOK: ${{ github.event.inputs.hf_token || secrets.HF_TOKEN }}
         run: |
-          python -c "
-          import json
-          with open('config.json') as f: c = json.load(f)
-          c['hf_token'] = '${{ github.event.inputs.hf_token }}'
-          with open('config.json', 'w') as f: json.dump(c, f, indent=2)
-          print('HF token injected into config.json')
-          "
+          echo "TELEGRAM_BOT_TOKEN=${TG_TOKEN}" >> .env
+          echo "TELEGRAM_CHAT_ID=${TG_CHAT}" >> .env
+          echo "HF_TOKEN=${HF_TOK}" >> .env
 
       - name: Verify dependencies
         run: python main.py --check
@@ -69,6 +68,13 @@ jobs:
       - name: Pre-download Whisper model
         run: |
           python -c "import whisper; whisper.load_model('base'); print('Whisper cached')"
+
+      - name: Ensure config.json exists
+        run: |
+          if [ ! -f config.json ]; then
+            cp config.example.json config.json 2>/dev/null || \
+            echo '{"shorts_count":5,"whisper_model":"base","language":"en"}' > config.json
+          fi
 
       - name: Run Shorts Factory v2 Pipeline
         env:

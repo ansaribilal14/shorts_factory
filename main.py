@@ -20,6 +20,15 @@ from pathlib import Path
 from colorama import Fore, Style, init
 init(autoreset=True)
 
+# Load .env for secrets (never committed)
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    load_dotenv(_env_path)
+    _DOTENV_LOADED = True
+except ImportError:
+    _DOTENV_LOADED = False
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 CLIPS_DIR = os.path.join(BASE_DIR, "clips")
@@ -125,11 +134,12 @@ def run_dependency_check():
     if config_ok:
         with open(CONFIG_PATH) as f:
             cfg = json.load(f)
-        if not cfg.get("hf_token"):
+        hf = cfg.get('hf_token') or os.environ.get('HF_TOKEN', '')
+        if not hf:
             print(f"\n  {Fore.YELLOW}  HuggingFace token not set \u2014 speaker camera will use center-crop fallback{Style.RESET_ALL}")
-            print(f"  {Fore.YELLOW}    Run python main.py to set it up.{Style.RESET_ALL}")
+            print(f"  {Fore.YELLOW}    Set HF_TOKEN in .env or run python main.py to set it up.{Style.RESET_ALL}")
         else:
-            print(f"  {Fore.GREEN}\u2713{Style.RESET_ALL} HuggingFace token (set)")
+            print(f"  {Fore.GREEN}\u2713{Style.RESET_ALL} HuggingFace token (set via .env)")
 
     print()
     if all(checks):
@@ -150,12 +160,31 @@ def run_dependency_check():
 # ═══════════════════════════════════════════════════════════════════════
 
 def load_config():
-    with open(CONFIG_PATH, 'r') as f:
-        return json.load(f)
+    # Load base config from config.json
+    config = {}
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+    # Inject secrets from .env (never stored in config.json)
+    _tg_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    _tg_chat = os.environ.get('TELEGRAM_CHAT_ID', '')
+    _hf_token = os.environ.get('HF_TOKEN', '')
+    if _tg_token and _tg_token != 'YOUR_BOT_TOKEN_HERE':
+        config['telegram_bot_token'] = _tg_token
+    if _tg_chat and _tg_chat != 'YOUR_CHAT_ID_HERE':
+        config['telegram_chat_id'] = _tg_chat
+    if _hf_token:
+        config['hf_token'] = _hf_token
+    return config
+
 
 def save_config(config):
+    # Only save non-secret keys to config.json
+    safe_config = {k: v for k, v in config.items()
+                   if k not in ('telegram_bot_token', 'telegram_chat_id', 'hf_token')}
     with open(CONFIG_PATH, 'w') as f:
-        json.dump(config, f, indent=2)
+        json.dump(safe_config, f, indent=2, ensure_ascii=False)
+        f.write('\n')
 
 def is_valid_youtube_url(url):
     return any(url.startswith(p) for p in [
@@ -412,9 +441,11 @@ def run_pipeline():
 
         token = input(f"  {Fore.YELLOW}Paste your HuggingFace token (or press Enter to skip): {Style.RESET_ALL}").strip()
         if token:
+            _save_to_env('HF_TOKEN', token)
             config['hf_token'] = token
-            save_config(config)
-            print(f"  {Fore.GREEN}Speaker detection ready.{Style.RESET_ALL}")
+            if _DOTENV_LOADED:
+                os.environ['HF_TOKEN'] = token
+            print(f"  {Fore.GREEN}Speaker detection ready (saved to .env).{Style.RESET_ALL}")
         else:
             print(f"  {Fore.YELLOW}Skipped. Speaker camera will use center-crop fallback.{Style.RESET_ALL}")
 
@@ -596,10 +627,10 @@ def run_pipeline():
         _print_done(n)
         return
 
-    config['telegram_bot_token'] = bot_token
-    config['telegram_chat_id'] = chat_id
-    save_config(config)
-    print(f"  {Fore.GREEN}Credentials saved.{Style.RESET_ALL}")
+    # Save credentials to .env (never to config.json)
+    _save_to_env('TELEGRAM_BOT_TOKEN', bot_token)
+    _save_to_env('TELEGRAM_CHAT_ID', chat_id)
+    print(f"  {Fore.GREEN}Credentials saved to .env (never committed to git).{Style.RESET_ALL}")
 
     try:
         upload_shorts_to_telegram(OUTPUT_DIR, bot_token, chat_id)
@@ -607,6 +638,25 @@ def run_pipeline():
         logger.error(f"Upload failed: {e}")
         print(f"  {Fore.RED}Upload failed: {e}{Style.RESET_ALL}")
     _print_done(n)
+
+
+def _save_to_env(key, value):
+    """Append or update a key in the .env file."""
+    env_path = os.path.join(BASE_DIR, '.env')
+    lines = []
+    found = False
+    if os.path.exists(env_path):
+        with open(env_path, 'r') as f:
+            for line in f:
+                if line.startswith(f'{key}='):
+                    lines.append(f'{key}={value}\n')
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f'{key}={value}\n')
+    with open(env_path, 'w') as f:
+        f.writelines(lines)
 
 
 def _print_done(n):
